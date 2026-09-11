@@ -1,4 +1,4 @@
-BIN := bin/pocp
+BIN := bin/cleaner
 DIR ?= example
 OUT ?= example-clean
 

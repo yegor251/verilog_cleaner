@@ -1,4 +1,4 @@
-# pocp
+# cleaner
 
 Статический анализатор и очиститель Verilog / SystemVerilog кода. Сканирует
 директивы препроцессора (`define`, `ifdef`, `include`, использования макросов),
@@ -7,7 +7,7 @@
 
 ## Режимы входа
 
-`pocp` принимает **один путь**, которым может быть одно из двух:
+`cleaner` принимает **один путь**, которым может быть одно из двух:
 
 1. **Папка** — сканируется всё дерево (файлы с поддерживаемыми расширениями
    подхватываются автоматически).
@@ -27,8 +27,8 @@ tb/scr1_top_tb_ahb.sv
 ## Сборка
 
 ```sh
-make build          # собирает ./bin/pocp
-go build -o pocp .  # либо собрать вручную
+make build          # собирает ./bin/cleaner
+go build -o cleaner .  # либо собрать вручную
 ```
 
 Требуется Go 1.26+.
@@ -40,19 +40,19 @@ go build -o pocp .  # либо собрать вручную
 
 ```sh
 # Отчёт по директивам в папке
-./pocp example/scr1/src
+./cleaner example/scr1/src
 
 # Только закомментированные директивы из списка .files
-./pocp -commented example/scr1/src/ahb_tb.files
+./cleaner -commented example/scr1/src/ahb_tb.files
 
 # Предпросмотр того, что изменит очистка (ничего не записывает)
-./pocp -clean out -dry-run example
+./cleaner -clean out -dry-run example
 
 # Очистить дерево папки в зеркальную выходную папку
-./pocp -clean example-clean -force example
+./cleaner -clean example-clean -force example
 
 # Очистить только файлы, перечисленные в .files
-./pocp -clean out -force example/scr1/src/ahb_tb.files
+./cleaner -clean out -force example/scr1/src/ahb_tb.files
 ```
 
 ### Флаги
@@ -77,7 +77,7 @@ go build -o pocp .  # либо собрать вручную
 ## Makefile
 
 ```sh
-make build     # собрать ./bin/pocp
+make build     # собрать ./bin/cleaner
 make test      # прогнать unit-тесты
 make vet       # go vet
 make fmt       # gofmt -w .
