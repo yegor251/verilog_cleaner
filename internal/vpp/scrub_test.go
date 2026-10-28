@@ -141,6 +141,28 @@ func TestScrubKeepsNameOnSurvivingIfdefLine(t *testing.T) {
 	}
 }
 
+// Макрос, определённый только в целиком удалённом (осиротевшем) файле, может
+// определяться снаружи набора (библиотека, флаги сборки) — его использования
+// в других файлах зачищать нельзя.
+func TestCleanerKeepsUsagesOfMacroDefinedOnlyInRemovedFile(t *testing.T) {
+	cleaner, sink := newTestCleaner(map[string]string{
+		"shim.svh": "`ifndef SHIM\n`define SHIM\n`define uvm_fatal VIS\n`endif\n",
+		"top.sv": "`ifdef NEVER\n`include \"shim.svh\"\n`endif\nmodule top;\n" +
+			"  initial `uvm_fatal(\"X\", \"boom\");\nendmodule\n",
+	})
+
+	result, err := cleaner.Clean(context.Background(), "root", CleanOptions{Out: "out"})
+	if err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+
+	assertAction(t, result, "root/shim.svh", ActionRemove)
+	top := sink.written[filepath.Join("out", "top.sv")]
+	if !strings.Contains(top, "`uvm_fatal(\"X\", \"boom\")") {
+		t.Errorf("usages of a macro defined in a removed file must be kept: %q", top)
+	}
+}
+
 func TestCleanerKeepsMacroNameInsideStringLiteral(t *testing.T) {
 	cleaner, sink := newTestCleaner(map[string]string{
 		"cfg.svh": "`ifndef CFG\n`define CFG\n" +

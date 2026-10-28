@@ -30,23 +30,27 @@ func (c *Cleaner) scrubRemovedMacros(states map[string]*fileState, paths []strin
 
 // removedDefineNames возвращает имена макросов, чей `define удалён и у которых
 // не осталось активного определения ни в одном выжившем файле. Ещё
-// определённые и защищённые макросы не трогаем.
+// определённые и защищённые макросы не трогаем. Определения из целиком
+// удалённых файлов не считаются «удалёнными»: осиротевший файл никто не
+// подключал, его макросы никогда не действовали в сканируемом наборе, а если
+// макрос определён снаружи (библиотеки, флаги сборки) — использования
+// по-прежнему валидны.
 func removedDefineNames(states map[string]*fileState, paths []string, protected map[string]bool) []string {
 	removed := make(map[string]bool)
 	alive := make(map[string]bool)
 
 	for _, p := range paths {
 		st := states[p]
+		if st.removed {
+			continue
+		}
 		for _, d := range st.base.Directives {
 			if d.Kind != KindDefine || d.Name == "" {
 				continue
 			}
-			if st.removed || st.covered(d.Offset) {
+			if st.covered(d.Offset) {
 				removed[d.Name] = true
 			}
-		}
-		if st.removed {
-			continue
 		}
 		for _, d := range st.base.Directives {
 			if d.Commented || d.Kind != KindDefine || d.Name == "" {

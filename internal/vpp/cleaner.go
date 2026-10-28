@@ -154,6 +154,9 @@ func (c *Cleaner) Clean(ctx context.Context, root string, opts CleanOptions) (*C
 	}
 
 	protected := toBoolSet(opts.Protected)
+	for _, name := range ToolDefines {
+		protected[name] = true
+	}
 	states, paths, err := buildStates(reports, protected)
 	if err != nil {
 		return nil, err
@@ -338,6 +341,14 @@ func toBoolSet(names []string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// ToolDefines — макросы, которые определяют сами инструменты (симуляторы и
+// синтезаторы, например Verilator задаёт `VERILATOR). В дереве их
+// определения нет, но ветки `ifdef по ним мёртвыми считать нельзя.
+var ToolDefines = []string{
+	"VERILATOR", "YOSYS", "SYNTHESIS", "VCS", "VCSMX",
+	"QUESTA", "MODELSIM", "XCELIUM", "IUS", "IVERILOG",
 }
 
 // pruneDeadBranches вырезает из каждого файла ветки ifdef, чьи макросы
