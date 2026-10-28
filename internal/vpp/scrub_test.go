@@ -122,3 +122,47 @@ func TestCleanerScrubsRemovedMacroAsSubstring(t *testing.T) {
 		t.Errorf("removed macro must be scrubbed as a substring: %q", core)
 	}
 }
+
+func TestCleanerKeepsMacroNameInsideStringLiteral(t *testing.T) {
+	cleaner, sink := newTestCleaner(map[string]string{
+		"cfg.svh": "`ifndef CFG\n`define CFG\n" +
+			"// `define MODE_A\n" +
+			"`endif\n",
+		"core.sv": "`include \"cfg.svh\"\nmodule core;\n" +
+			"  initial $display(\"MODE_A is enabled\");\n" +
+			"  initial $display(\"state = MODE_A;\");\n" +
+			"endmodule\n",
+	})
+
+	if _, err := cleaner.Clean(context.Background(), "root", CleanOptions{Out: "out"}); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+
+	core := sink.written[filepath.Join("out", "core.sv")]
+	if !strings.Contains(core, `$display("MODE_A is enabled")`) {
+		t.Errorf("macro name inside a string literal must be kept: %q", core)
+	}
+	if !strings.Contains(core, `"state = MODE_A;"`) {
+		t.Errorf("macro name inside a string literal must be kept: %q", core)
+	}
+}
+
+func TestCleanerDoesNotCorruptIdentifiersContainingMacroName(t *testing.T) {
+	cleaner, sink := newTestCleaner(map[string]string{
+		"cfg.svh": "`ifndef CFG\n`define CFG\n" +
+			"// `define MODE_A\n" +
+			"`endif\n",
+		"core.sv": "`include \"cfg.svh\"\nmodule core;\n" +
+			"  wire MODE_A_bus;\n" +
+			"endmodule\n",
+	})
+
+	if _, err := cleaner.Clean(context.Background(), "root", CleanOptions{Out: "out"}); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+
+	core := sink.written[filepath.Join("out", "core.sv")]
+	if !strings.Contains(core, "wire MODE_A_bus;") {
+		t.Errorf("identifier containing a removed macro name must not be corrupted: %q", core)
+	}
+}

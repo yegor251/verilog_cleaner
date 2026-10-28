@@ -50,6 +50,7 @@ type CleanResult struct {
 	Out      string        `json:"out"`
 	Rounds   int           `json:"rounds"`
 	Outcomes []FileOutcome `json:"outcomes"`
+	Warnings []string      `json:"warnings,omitempty"`
 	DryRun   bool          `json:"dry_run"`
 }
 
@@ -137,6 +138,13 @@ func (c *Cleaner) Clean(ctx context.Context, root string, opts CleanOptions) (*C
 	var reports []FileReport
 	var err error
 	if len(opts.Files) > 0 {
+		// В .files-режиме раскрываем include-замыкание: неподключённые в
+		// список заголовки несут определения макросов, без них живые ветки
+		// ошибочно считаются мёртвыми.
+		opts.Files, err = c.includeClosure(root, opts.Files)
+		if err != nil {
+			return nil, err
+		}
 		reports, err = c.scanner.ScanFiles(ctx, root, opts.Files)
 	} else {
 		reports, err = c.scanner.ScanDir(ctx, root)
@@ -188,7 +196,7 @@ func (c *Cleaner) Clean(ctx context.Context, root string, opts CleanOptions) (*C
 		}
 		return result, nil
 	}
-	if err := c.materialize(root, opts, states); err != nil {
+	if err := c.materialize(root, opts, states, &result.Warnings); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -222,8 +230,7 @@ func (c *Cleaner) cascade(states map[string]*fileState, paths []string, idx *inc
 	round := 0
 	for {
 		round++
-		defined := definedMacros(states, paths, external, protected)
-		changed := c.pruneDeadBranches(states, paths, defined, round)
+		changed := c.pruneDeadBranches(states, paths, external, protected, round)
 		if c.removeUselessFiles(states, paths, idx, everReferenced, round) {
 			changed = true
 		}
@@ -231,6 +238,76 @@ func (c *Cleaner) cascade(states map[string]*fileState, paths []string, idx *inc
 			return round - 1
 		}
 	}
+}
+
+// includeClosure дополняет список .files транзитивным замыканием `include:
+// для каждого перечисленного файла находит цели его включений по всему
+// дереву и добавляет их к списку, пока не перестанут появляться новые файлы.
+func (c *Cleaner) includeClosure(root string, files []string) ([]string, error) {
+	var all []string
+	err := c.fs.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if _, skip := c.scanner.skipDirs[d.Name()]; skip {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if c.scanner.matches(path) {
+			all = append(all, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	idx := newIncludeIndex(root, all)
+
+	listed := make(map[string]bool, len(files))
+	seen := make(map[string]bool, len(files))
+	queue := make([]string, 0, len(files))
+	for _, rel := range files {
+		p := filepath.Join(root, rel)
+		listed[p] = true
+		if !seen[p] {
+			seen[p] = true
+			queue = append(queue, p)
+		}
+	}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		src, err := c.fs.ReadFile(p)
+		if err != nil {
+			// недоступный файл из списка — ошибка всплывёт при ScanFiles
+			continue
+		}
+		for _, d := range ScanSource(p, src).Directives {
+			if d.Commented || d.Kind != KindInclude || d.Name == "" {
+				continue
+			}
+			for _, resolved := range idx.resolve(p, d.Name) {
+				if resolved != p && !seen[resolved] {
+					seen[resolved] = true
+					queue = append(queue, resolved)
+				}
+			}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	out = append(out, files...)
+	for p := range seen {
+		if !listed[p] {
+			rel, err := filepath.Rel(root, p)
+			if err == nil {
+				out = append(out, rel)
+			}
+		}
+	}
+	return out, nil
 }
 
 // collectEverReferenced находит файлы, на которые в исходном коде ссылались
@@ -253,16 +330,23 @@ func collectEverReferenced(states map[string]*fileState, paths []string, idx *in
 	return ever
 }
 
-// definedMacros собирает множество определённых макросов: заданные извне,
-// защищённые и выжившие активные `define.
-func definedMacros(states map[string]*fileState, paths []string, external []string, protected map[string]bool) map[string]bool {
-	defined := make(map[string]bool, len(paths)*4)
-	for _, name := range external {
-		defined[name] = true
+func toBoolSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			set[n] = true
+		}
 	}
-	for name := range protected {
-		defined[name] = true
-	}
+	return set
+}
+
+// pruneDeadBranches вырезает из каждого файла ветки ifdef, чьи макросы
+// не определены, и отмечает номер раунда первой правки файла. Условия
+// вычисляются пофайлово: собственные define/undef/undefineall файла — по
+// позиции в тексте, макросы из других файлов, внешние и защищённые —
+// консервативно считаются определёнными.
+func (c *Cleaner) pruneDeadBranches(states map[string]*fileState, paths []string, external []string, protected map[string]bool, round int) bool {
+	definedIn := make(map[string]map[string]bool)
 	for _, p := range paths {
 		st := states[p]
 		if st.removed {
@@ -275,25 +359,13 @@ func definedMacros(states map[string]*fileState, paths []string, external []stri
 			if st.covered(d.Offset) {
 				continue
 			}
-			defined[d.Name] = true
+			if definedIn[d.Name] == nil {
+				definedIn[d.Name] = make(map[string]bool, 1)
+			}
+			definedIn[d.Name][p] = true
 		}
 	}
-	return defined
-}
 
-func toBoolSet(names []string) map[string]bool {
-	set := make(map[string]bool, len(names))
-	for _, n := range names {
-		if n = strings.TrimSpace(n); n != "" {
-			set[n] = true
-		}
-	}
-	return set
-}
-
-// pruneDeadBranches вырезает из каждого файла ветки ifdef, чьи макросы
-// не определены, и отмечает номер раунда первой правки файла.
-func (c *Cleaner) pruneDeadBranches(states map[string]*fileState, paths []string, defined map[string]bool, round int) bool {
 	changed := false
 	for _, p := range paths {
 		st := states[p]
@@ -301,7 +373,20 @@ func (c *Cleaner) pruneDeadBranches(states map[string]*fileState, paths []string
 			continue
 		}
 
-		planned := PlanDeadBranches(st.base, st.orig, defined, st.covered)
+		env := CondEnv{Elsewhere: make(map[string]bool, len(definedIn)+len(external)+len(protected))}
+		for name, files := range definedIn {
+			if !files[p] {
+				env.Elsewhere[name] = true
+			}
+		}
+		for _, name := range external {
+			env.Elsewhere[name] = true
+		}
+		for name := range protected {
+			env.Elsewhere[name] = true
+		}
+
+		planned := PlanDeadBranches(st.base, st.orig, env, st.covered)
 		fresh := make([]Edit, 0, len(planned))
 		for _, e := range planned {
 			if st.covered(e.Start) && st.covered(e.End-1) {
@@ -433,15 +518,17 @@ func (c *Cleaner) materializeFiles(root string, opts CleanOptions, states map[st
 }
 
 // materialize копирует всё дерево в выходную папку, подменяя очищенные файлы
-// и пропуская удалённые.
-func (c *Cleaner) materialize(root string, opts CleanOptions, states map[string]*fileState) error {
+// и пропуская удалённые. Нечитаемые файлы и битые symlink'и не прерывают
+// очистку — они пропускаются с предупреждением.
+func (c *Cleaner) materialize(root string, opts CleanOptions, states map[string]*fileState, warnings *[]string) error {
 	if err := c.sink.MkdirAll(opts.Out, dirPerm); err != nil {
 		return err
 	}
 
 	return c.fs.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			*warnings = append(*warnings, fmt.Sprintf("skipped %s: %v", path, err))
+			return nil
 		}
 
 		rel, relErr := filepath.Rel(root, path)
@@ -469,10 +556,33 @@ func (c *Cleaner) materialize(root string, opts CleanOptions, states map[string]
 			return c.sink.WriteFile(target, st.cur, perm)
 		}
 
+		if d.Type()&fs.ModeSymlink != 0 {
+			return c.copySymlink(path, target, warnings)
+		}
+		if !d.Type().IsRegular() {
+			*warnings = append(*warnings, fmt.Sprintf("skipped non-regular file %s", path))
+			return nil
+		}
+
 		data, readErr := c.fs.ReadFile(path)
 		if readErr != nil {
-			return readErr
+			*warnings = append(*warnings, fmt.Sprintf("skipped %s: %v", path, readErr))
+			return nil
 		}
 		return c.sink.WriteFile(target, data, perm)
 	})
+}
+
+// copySymlink воспроизводит символическую ссылку как есть; если создать её
+// не удалось — пропускает с предупреждением.
+func (c *Cleaner) copySymlink(path, target string, warnings *[]string) error {
+	oldname, err := c.fs.Readlink(path)
+	if err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("skipped symlink %s: %v", path, err))
+		return nil
+	}
+	if err := c.sink.Symlink(oldname, target); err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("skipped symlink %s: %v", path, err))
+	}
+	return nil
 }

@@ -84,6 +84,50 @@ func TestPlanCommentedDirectives(t *testing.T) {
 			src:  "// see `WIDTH for details\n`define A 1\n",
 			want: "// see `WIDTH for details\n`define A 1\n",
 		},
+		{
+			name: "commented ifdef and endif around active code are not paired",
+			src: "// `ifdef OLD — old implementation\n" +
+				"// wire x;\n" +
+				"`define KEEP 1\n" +
+				"// `endif\n" +
+				"module m; endmodule\n",
+			// `define KEEP выживает; удаляются только строки-директивы.
+			// Закомментированный код без директив инструмент не чистит.
+			want: "// wire x;\n`define KEEP 1\nmodule m; endmodule\n",
+		},
+		{
+			name: "endif mentioned mid-prose does not close the block",
+			src: "// `ifdef OLD\n" +
+				"// old code `endif\n" +
+				"// `endif\n" +
+				"`define KEEP 1\n",
+			want: "`define KEEP 1\n",
+		},
+		{
+			name: "lone commented endif lines are removed",
+			src: "// `ifdef OLD\n" +
+				"// `endif OLD was here\n" +
+				"// `endif\n" +
+				"`define KEEP 1\n" +
+				"module m; endmodule\n",
+			want: "`define KEEP 1\nmodule m; endmodule\n",
+		},
+		{
+			name: "active code between ifdef and commented endif is kept",
+			src: "`ifdef LIVE\n" +
+				"wire keep_me;\n" +
+				"`endif\n" +
+				"// cleanup `endif later\n",
+			// `endif в середине прозы — не директива, комментарий сохраняется
+			want: "`ifdef LIVE\nwire keep_me;\n`endif\n// cleanup `endif later\n",
+		},
+		{
+			name: "endif word in a block doc comment is not a directive",
+			src:  "/**\n * \\brief doc\n * `endif example\n */\n`ifdef FEATURE\nwire f;\n`endif\nmodule m; endmodule\n",
+			// блочный комментарий с прозой не удаляется (мёртвую ветку ifdef
+			// вырежет отдельный проход мёртвых веток)
+			want: "/**\n * \\brief doc\n * `endif example\n */\n`ifdef FEATURE\nwire f;\n`endif\nmodule m; endmodule\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +136,33 @@ func TestPlanCommentedDirectives(t *testing.T) {
 				t.Errorf("got:\n%q\nwant:\n%q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeEditsIsIdempotent(t *testing.T) {
+	// Правка, уже расширенная до целых строк, не должна расползаться дальше
+	// при повторной нормализации в recompute — следующая строка-комментарий
+	// не должна поглощаться.
+	src := "// `ifdef OLD\n// `endif OLD was here\n// `endif\n`define KEEP 1\nmodule m; endmodule\n"
+	report := ScanSource("f.svh", []byte(src))
+	edits := planCommentedDirectives(report, []byte(src), nil)
+
+	again := normalizeEdits([]byte(src), append([]Edit(nil), edits...))
+	again = normalizeEdits([]byte(src), again)
+	if len(again) != len(edits) {
+		t.Fatalf("repeated normalize changed edit count: %d -> %d", len(edits), len(again))
+	}
+	for i := range edits {
+		if again[i].Start != edits[i].Start || again[i].End != edits[i].End {
+			t.Errorf("edit[%d] creeped: [%d,%d) -> [%d,%d)",
+				i, edits[i].Start, edits[i].End, again[i].Start, again[i].End)
+		}
+	}
+
+	got := string(ApplyEdits([]byte(src), edits))
+	want := "`define KEEP 1\nmodule m; endmodule\n"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
 	}
 }
 

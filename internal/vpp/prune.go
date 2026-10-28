@@ -64,11 +64,19 @@ func planCommentedDirectives(report FileReport, src []byte, protected map[string
 	var stack []int
 	for _, i := range commented {
 		d := report.Directives[i]
+		if d.Kind.IsConditional() && !startsCommentLine(src, d) {
+			// слово `endif/`ifdef в середине текста комментария — проза,
+			// а не закомментированная директива
+			continue
+		}
 		switch d.Kind {
 		case KindIfdef, KindIfndef:
 			stack = append(stack, i)
 		case KindEndif:
 			if len(stack) == 0 {
+				if d.CommentKind == CommentLine {
+					edits = append(edits, loneConditionalEdit(report, src, i))
+				}
 				continue
 			}
 			open := stack[len(stack)-1]
@@ -76,10 +84,32 @@ func planCommentedDirectives(report FileReport, src []byte, protected map[string
 			if len(stack) > 0 {
 				continue
 			}
+			if !commentsOnlyBetween(report, src, open, i) {
+				// между закомментированными ifdef и endif есть активный код —
+				// это не один закомментированный блок, целиком удалять нельзя
+				if report.Directives[open].CommentKind == CommentLine {
+					edits = append(edits, loneConditionalEdit(report, src, open))
+				}
+				if d.CommentKind == CommentLine {
+					edits = append(edits, loneConditionalEdit(report, src, i))
+				}
+				continue
+			}
 			if blockHasProtected(report, open, i, protected) {
 				continue
 			}
 			edits = append(edits, blockEdit(report, src, open, i, consumed))
+		case KindElsif, KindElse:
+			if len(stack) == 0 && d.CommentKind == CommentLine {
+				edits = append(edits, loneConditionalEdit(report, src, i))
+			}
+		}
+	}
+	for _, i := range stack {
+		// одиночные строки-директивы удаляем только у построчных комментариев:
+		// в блочном комментарии `endif — чаще всего проза документации
+		if report.Directives[i].CommentKind == CommentLine {
+			edits = append(edits, loneConditionalEdit(report, src, i))
 		}
 	}
 
@@ -107,6 +137,65 @@ func planCommentedDirectives(report FileReport, src []byte, protected map[string
 	}
 
 	return normalizeEdits(src, edits)
+}
+
+// startsCommentLine — true, если директива является первым непробельным
+// содержимым своей строки: тогда это закомментированная директива, а не
+// упоминание `endif в середине прозы комментария.
+func startsCommentLine(src []byte, d Directive) bool {
+	lineStart := d.Offset
+	for lineStart > 0 && src[lineStart-1] != '\n' {
+		lineStart--
+	}
+	for i := lineStart; i < d.Offset; i++ {
+		switch src[i] {
+		case ' ', '\t', '\r', '/', '*':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// commentsOnlyBetween — true, если между закомментированными директивами open
+// и close нет активного кода: только комментарии и пустые строки.
+func commentsOnlyBetween(report FileReport, src []byte, open, close int) bool {
+	oi := report.Directives[open].CommentIndex
+	ci := report.Directives[close].CommentIndex
+	if oi == ci {
+		return true // обе директивы внутри одного комментария
+	}
+	if oi > ci {
+		oi, ci = ci, oi
+	}
+	pos := report.Comments[oi].End
+	for k := oi + 1; k <= ci; k++ {
+		span := report.Comments[k]
+		if span.Start < pos {
+			continue // пересекающийся комментарий, уже покрыт
+		}
+		if !isBlank(src[pos:span.Start]) {
+			return false
+		}
+		pos = span.End
+	}
+	return true
+}
+
+// loneConditionalEdit удаляет строку комментария с одиночной (непарной)
+// условной директивой — это осиротевший остаток закомментированного блока.
+func loneConditionalEdit(report FileReport, src []byte, i int) Edit {
+	d := report.Directives[i]
+	span := report.Comments[d.CommentIndex]
+	end, endLine := extendContinuedComment(report, src, d.CommentIndex)
+	return Edit{
+		Start:  span.Start,
+		End:    end,
+		Line:   span.StartLine,
+		Lines:  endLine - span.StartLine + 1,
+		Reason: ReasonCommentedBlock,
+		Detail: "`" + d.Directive + " (unpaired)",
+	}
 }
 
 func blockHasProtected(report FileReport, open, close int, protected map[string]bool) bool {
@@ -218,28 +307,40 @@ func normalizeEdits(src []byte, edits []Edit) []Edit {
 }
 
 // expandToWholeLines расширяет удаление до всей строки, если вокруг только
-// пробелы и комментарии — тогда строку можно вырезать целиком.
+// пробелы и комментарии — тогда строку можно вырезать целиком. Идемпотентна:
+// уже выровненная по строкам правка не расширяется повторно (recompute
+// нормализует правки заново каждый раунд).
 func expandToWholeLines(src []byte, e Edit) Edit {
-	lineStart := e.Start
-	for lineStart > 0 && src[lineStart-1] != '\n' {
-		lineStart--
-	}
-	if !isFiller(src[lineStart:e.Start], false) {
-		for e.Start > lineStart && (src[e.Start-1] == ' ' || src[e.Start-1] == '\t') {
-			e.Start--
-		}
+	alignedStart := e.Start == 0 || src[e.Start-1] == '\n'
+	alignedEnd := e.End >= len(src) || src[e.End-1] == '\n'
+	if alignedStart && alignedEnd {
 		return e
 	}
 
+	lineStart := e.Start
+	if !alignedStart {
+		for lineStart > 0 && src[lineStart-1] != '\n' {
+			lineStart--
+		}
+		if !isFiller(src[lineStart:e.Start], false) {
+			for e.Start > lineStart && (src[e.Start-1] == ' ' || src[e.Start-1] == '\t') {
+				e.Start--
+			}
+			return e
+		}
+	}
+
 	lineEnd := e.End
-	for lineEnd < len(src) && src[lineEnd] != '\n' {
-		lineEnd++
-	}
-	if !isFiller(src[e.End:lineEnd], true) {
-		return e
-	}
-	if lineEnd < len(src) {
-		lineEnd++
+	if !alignedEnd {
+		for lineEnd < len(src) && src[lineEnd] != '\n' {
+			lineEnd++
+		}
+		if !isFiller(src[e.End:lineEnd], true) {
+			return e
+		}
+		if lineEnd < len(src) {
+			lineEnd++
+		}
 	}
 
 	e.Start = lineStart

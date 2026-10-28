@@ -142,10 +142,18 @@ type CommentSpan struct {
 	EndLine   int         `json:"end_line"`
 }
 
+// Span — простой диапазон байт в исходнике (используется для строковых
+// литералов).
+type Span struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 type FileReport struct {
 	Path       string        `json:"path"`
 	Directives []Directive   `json:"directives"`
 	Comments   []CommentSpan `json:"-"`
+	Strings    []Span        `json:"-"`
 	Source     []byte        `json:"-"`
 	Err        string        `json:"error,omitempty"`
 }

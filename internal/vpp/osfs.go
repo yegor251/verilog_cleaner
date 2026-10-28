@@ -13,6 +13,10 @@ func (OSFileSystem) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func (OSFileSystem) Readlink(path string) (string, error) {
+	return os.Readlink(path)
+}
+
 func (OSFileSystem) WalkDir(root string, fn fs.WalkDirFunc) error {
 	return filepath.WalkDir(root, fn)
 }
@@ -34,6 +38,10 @@ func (OSFileSystem) MkdirAll(path string, perm fs.FileMode) error {
 
 func (OSFileSystem) WriteFile(path string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(path, data, perm)
+}
+
+func (OSFileSystem) Symlink(oldname, newname string) error {
+	return os.Symlink(oldname, newname)
 }
 
 func (OSFileSystem) RemoveAll(path string) error {

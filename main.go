@@ -211,6 +211,9 @@ func printClean(result *vpp.CleanResult, elapsed time.Duration) {
 		}
 		fmt.Printf("removed: %s\n", strings.Join(names, ", "))
 	}
+	for _, warn := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
+	}
 	if result.DryRun {
 		fmt.Printf("\nnothing written (dry-run)\n")
 	}

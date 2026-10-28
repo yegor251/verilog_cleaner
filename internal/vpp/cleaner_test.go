@@ -35,6 +35,10 @@ func (s *stubSink) WriteFile(path string, data []byte, _ fs.FileMode) error {
 	return nil
 }
 
+func (s *stubSink) Symlink(oldname, newname string) error {
+	return nil
+}
+
 func (s *stubSink) RemoveAll(path string) error {
 	s.removed = append(s.removed, path)
 	delete(s.exists, path)
@@ -241,6 +245,35 @@ func TestCleanerDryRunWritesNothing(t *testing.T) {
 	assertAction(t, result, "root/dead.vh", ActionRemove)
 	if len(sink.written) != 0 || len(sink.dirs) != 0 {
 		t.Errorf("dry-run wrote %d files and %d dirs", len(sink.written), len(sink.dirs))
+	}
+}
+
+func TestCleanerSkipsUnreadableFileWithWarning(t *testing.T) {
+	cleaner, sink := newTestCleaner(map[string]string{
+		"top.sv":  "module top; endmodule\n",
+		"doc.txt": "generated elsewhere",
+	})
+	stub := cleaner.fs.(*stubFS)
+	stub.readErr["root/doc.txt"] = fs.ErrNotExist
+
+	result, err := cleaner.Clean(context.Background(), "root", CleanOptions{Out: "out"})
+	if err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if _, ok := sink.written[filepath.Join("out", "doc.txt")]; ok {
+		t.Error("unreadable file must be skipped")
+	}
+	if _, ok := sink.written[filepath.Join("out", "top.sv")]; !ok {
+		t.Error("readable files must still be written")
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "doc.txt") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warning about doc.txt expected, got %v", result.Warnings)
 	}
 }
 

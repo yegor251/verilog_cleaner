@@ -9,7 +9,7 @@ func pruneBranches(t *testing.T, src string, defined ...string) string {
 		set[name] = true
 	}
 	report := ScanSource("f.sv", []byte(src))
-	edits := PlanDeadBranches(report, []byte(src), set, nil)
+	edits := PlanDeadBranches(report, []byte(src), CondEnv{Elsewhere: set}, nil)
 	return string(ApplyEdits([]byte(src), edits))
 }
 
@@ -119,6 +119,36 @@ func TestPlanDeadBranches(t *testing.T) {
 				"`endif\nwire also_keep;\n",
 			want: "wire keep;\nwire also_keep;\n",
 		},
+		{
+			name: "undef kills a later ifdef",
+			src:  "`define FEATURE 1\n`undef FEATURE\n`ifdef FEATURE\nwire f;\n`endif\nwire keep;\n",
+			want: "`define FEATURE 1\n`undef FEATURE\nwire keep;\n",
+		},
+		{
+			name: "ifdef before the undef is kept",
+			src:  "`define FEATURE 1\n`ifdef FEATURE\nwire f;\n`endif\n`undef FEATURE\n",
+			want: "`define FEATURE 1\n`ifdef FEATURE\nwire f;\n`endif\n`undef FEATURE\n",
+		},
+		{
+			name: "define after undef revives the macro",
+			src:  "`define FEATURE 1\n`undef FEATURE\n`define FEATURE 2\n`ifdef FEATURE\nwire f;\n`endif\n",
+			want: "`define FEATURE 1\n`undef FEATURE\n`define FEATURE 2\n`ifdef FEATURE\nwire f;\n`endif\n",
+		},
+		{
+			name: "undefineall kills everything defined before it",
+			src:  "`define A 1\n`define B 2\n`undefineall\n`ifdef A\nwire a;\n`endif\n`ifdef B\nwire b;\n`endif\nwire keep;\n",
+			want: "`define A 1\n`define B 2\n`undefineall\nwire keep;\n",
+		},
+		{
+			name: "ifdef inside a macro body is left alone",
+			src:  "`define M(A) `ifdef A wire a_; `else wire b_; `endif\nmodule m;\n`M(X)\nendmodule\n",
+			want: "`define M(A) `ifdef A wire a_; `else wire b_; `endif\nmodule m;\n`M(X)\nendmodule\n",
+		},
+		{
+			name: "macro body endif does not pair with file level ifdef",
+			src:  "`define M `endif\n`ifdef KEEP\nwire k;\n",
+			want: "`define M `endif\n`ifdef KEEP\nwire k;\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -133,7 +163,7 @@ func TestPlanDeadBranches(t *testing.T) {
 func TestPlanDeadBranchesReasons(t *testing.T) {
 	src := "`ifdef DEAD\n x;\n`elsif LIVE\n y;\n`endif\n"
 	report := ScanSource("f.sv", []byte(src))
-	edits := PlanDeadBranches(report, []byte(src), map[string]bool{"LIVE": true}, nil)
+	edits := PlanDeadBranches(report, []byte(src), CondEnv{Elsewhere: map[string]bool{"LIVE": true}}, nil)
 
 	if len(edits) != 2 {
 		t.Fatalf("got %d edits, want 2: %+v", len(edits), edits)

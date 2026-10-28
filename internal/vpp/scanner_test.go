@@ -28,6 +28,10 @@ func (s *stubFS) ReadFile(p string) ([]byte, error) {
 	return []byte(content), nil
 }
 
+func (s *stubFS) Readlink(p string) (string, error) {
+	return "", fs.ErrInvalid
+}
+
 func (s *stubFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	if s.walkErr != nil {
 		return s.walkErr

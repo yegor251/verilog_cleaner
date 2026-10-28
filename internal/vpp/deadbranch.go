@@ -1,5 +1,13 @@
 package vpp
 
+// CondEnv — макро-окружение для планировщика веток. Elsewhere — макросы,
+// определённые вне данного файла (другие файлы, теневые include-заголовки,
+// внешние флаги сборки, защищённые): их условия консервативно считаются
+// живыми, потому что порядок компиляции файлов неизвестен.
+type CondEnv struct {
+	Elsewhere map[string]bool
+}
+
 type condValue uint8
 
 const (
@@ -22,12 +30,15 @@ type condBlock struct {
 }
 
 // parseCondBlocks разбирает вложенные ifdef..endif в дерево условных блоков.
+// Директивы внутри тел макросов (InMacroBody) пропускаются: при раскрытии
+// макроса их условия зависят от аргументов, статически они не вычисляются, и
+// они не должны спариваться с endif'ами уровня файла.
 func parseCondBlocks(report FileReport) []*condBlock {
 	var roots []*condBlock
 	var stack []*condBlock
 
 	for i, d := range report.Directives {
-		if d.Commented {
+		if d.Commented || d.InMacroBody {
 			continue
 		}
 		switch d.Kind {
@@ -61,21 +72,78 @@ func parseCondBlocks(report FileReport) []*condBlock {
 	return roots
 }
 
-// evalSection решает, какая ветка блока выполняется: известный макрос — unknown
-// (живёт), отсутствующий — false (мертва), else — true.
-func evalSection(d Directive, defined map[string]bool) condValue {
-	switch d.Kind {
-	case KindIfdef, KindElsif:
-		if d.Name == "" || defined[d.Name] {
-			return condUnknown
+// condTimeline отслеживает, какие макросы убиты в самом файле его собственными
+// `undef/`undefineall. Условие на макрос заведомо ложно (или истинно для
+// `ifndef), только если макрос не определён вне файла и к точке условия убит
+// его же `undef либо не определён вовсе; в остальных случаях значение
+// неизвестно (ветка сохраняется).
+type condTimeline struct {
+	elsewhere map[string]bool
+	defined   map[string]int // имя -> смещение последнего `define
+	killedAt  map[string]int // имя -> смещение `undef/`undefineall, убившего макрос
+}
+
+func newCondTimeline(report FileReport, env CondEnv, skip func(offset int) bool) *condTimeline {
+	t := &condTimeline{
+		elsewhere: env.Elsewhere,
+		defined:   make(map[string]int),
+		killedAt:  make(map[string]int),
+	}
+	for _, d := range report.Directives {
+		if d.Commented {
+			continue
 		}
+		removed := skip != nil && skip(d.Offset)
+		switch d.Kind {
+		case KindDefine:
+			if d.Name == "" || removed {
+				continue
+			}
+			t.defined[d.Name] = d.Offset
+			delete(t.killedAt, d.Name) // define после undef оживляет макрос
+		case KindUndef:
+			if d.Name == "" || d.InMacroBody || removed || t.elsewhere[d.Name] {
+				continue
+			}
+			if at, ok := t.defined[d.Name]; !ok || at < d.Offset {
+				t.killedAt[d.Name] = d.Offset
+			}
+		case KindUndefineAll:
+			if d.InMacroBody || removed {
+				continue
+			}
+			for name, at := range t.defined {
+				if !t.elsewhere[name] && at < d.Offset {
+					t.killedAt[name] = d.Offset
+				}
+			}
+		}
+	}
+	return t
+}
+
+// value вычисляет значение условия на макрос d.
+func (t *condTimeline) value(d Directive) condValue {
+	if d.Kind == KindElse {
+		return condTrue
+	}
+	if d.Name == "" || t.elsewhere[d.Name] {
+		return condUnknown
+	}
+	if at, killed := t.killedAt[d.Name]; killed && at <= d.Offset {
+		return deadValue(d.Kind)
+	}
+	if _, alive := t.defined[d.Name]; alive {
+		return condUnknown
+	}
+	return deadValue(d.Kind)
+}
+
+func deadValue(kind Kind) condValue {
+	switch kind {
+	case KindIfdef, KindElsif:
 		return condFalse
 	case KindIfndef:
-		if d.Name == "" || defined[d.Name] {
-			return condUnknown
-		}
-		return condTrue
-	case KindElse:
 		return condTrue
 	}
 	return condUnknown
@@ -83,21 +151,26 @@ func evalSection(d Directive, defined map[string]bool) condValue {
 
 // PlanDeadBranches строит правки для удаления мёртвых веток: выбранную живую
 // ветку оставляет, остальные помечает на вырезку.
-func PlanDeadBranches(report FileReport, src []byte, defined map[string]bool, skip func(offset int) bool) []Edit {
+func PlanDeadBranches(report FileReport, src []byte, env CondEnv, skip func(offset int) bool) []Edit {
 	if skip == nil {
 		skip = func(int) bool { return false }
 	}
-	p := &branchPlanner{report: report, src: src, defined: defined, skip: skip}
+	t := newCondTimeline(report, env, skip)
+	values := make([]condValue, len(report.Directives))
+	for i := range report.Directives {
+		values[i] = t.value(report.Directives[i])
+	}
+	p := &branchPlanner{report: report, src: src, values: values, skip: skip}
 	p.planBlocks(parseCondBlocks(report))
 	return normalizeEdits(src, p.edits)
 }
 
 type branchPlanner struct {
-	report  FileReport
-	src     []byte
-	defined map[string]bool
-	skip    func(offset int) bool
-	edits   []Edit
+	report FileReport
+	src    []byte
+	values []condValue
+	skip   func(offset int) bool
+	edits  []Edit
 }
 
 func (p *branchPlanner) planBlocks(blocks []*condBlock) {
@@ -112,7 +185,7 @@ func (p *branchPlanner) planBlocks(blocks []*condBlock) {
 func (p *branchPlanner) planBlock(b *condBlock) {
 	chosen, unknown := -1, -1
 	for i, s := range b.sections {
-		switch evalSection(p.report.Directives[s.dir], p.defined) {
+		switch p.values[s.dir] {
 		case condFalse:
 			continue
 		case condTrue:
@@ -185,7 +258,7 @@ func (p *branchPlanner) dropFalseTail(b *condBlock, from int) {
 	for i := from + 1; i < len(b.sections); i++ {
 		s := b.sections[i]
 		d := p.report.Directives[s.dir]
-		if evalSection(d, p.defined) != condFalse {
+		if p.values[s.dir] != condFalse {
 			continue
 		}
 		end := s.bodyEnd

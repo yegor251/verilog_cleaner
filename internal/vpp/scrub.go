@@ -7,7 +7,7 @@ import (
 
 // scrubRemovedMacros — финальный проход после каскада: собирает имена
 // удалённых макросов и вычищает их из выживших файлов, даже как подстроку
-// (например внутри комментария).
+// (например внутри комментария). Строковые литералы не трогаются.
 func (c *Cleaner) scrubRemovedMacros(states map[string]*fileState, paths []string, protected map[string]bool) {
 	removed := removedDefineNames(states, paths, protected)
 	if len(removed) == 0 {
@@ -19,7 +19,7 @@ func (c *Cleaner) scrubRemovedMacros(states map[string]*fileState, paths []strin
 		if st.removed {
 			continue
 		}
-		planned := planMacroScrub(st.orig, st.edits, removed)
+		planned := planMacroScrub(st.orig, st.base, st.edits, removed)
 		if len(planned) == 0 {
 			continue
 		}
@@ -70,12 +70,15 @@ func removedDefineNames(states map[string]*fileState, paths []string, protected 
 }
 
 // planMacroScrub находит вхождения имени удалённого макроса, не перекрытые
-// другими правками, и планирует их удаление. Использования `NAME теряют
-// ведущий бэктик, а строки, где после удаления осталась лишь пунктуация
-// комментария, удаляются целиком.
-func planMacroScrub(src []byte, edits []Edit, names []string) []Edit {
+// другими правками, и планирует их удаление. Вхождения внутри строковых
+// литералов пропускаются; в коде имя удаляется только целым токеном (не как
+// часть более длинного идентификатора); в комментарях — как подстроку.
+// Строки, где после удаления осталась лишь пунктуация комментария, удаляются
+// целиком.
+func planMacroScrub(src []byte, report FileReport, edits []Edit, names []string) []Edit {
 	var out []Edit
 
+	lineNo := 1
 	lineStart := 0
 	for lineStart <= len(src) {
 		lineEnd := bytes.IndexByte(src[lineStart:], '\n')
@@ -104,8 +107,14 @@ func planMacroScrub(src []byte, edits []Edit, names []string) []Edit {
 				if overlapsEdits(edits, start, end) {
 					continue
 				}
+				if inString(report.Strings, start) {
+					continue
+				}
+				if !scrubbableAt(src, report, start, end) {
+					continue
+				}
 				rmStart, rmEnd := start, end
-				if start > lineStart && src[start-1] == '`' && !overlapsEdits(edits, start-1, start) {
+				if start > 0 && src[start-1] == '`' && !overlapsEdits(edits, start-1, start) {
 					rmStart = start - 1
 				}
 				for i := rmStart; i < rmEnd; i++ {
@@ -114,6 +123,8 @@ func planMacroScrub(src []byte, edits []Edit, names []string) []Edit {
 				occ = append(occ, Edit{
 					Start:  rmStart,
 					End:    rmEnd,
+					Line:   lineNo,
+					Lines:  1,
 					Reason: ReasonRemovedMacro,
 					Detail: "`" + name,
 				})
@@ -128,6 +139,8 @@ func planMacroScrub(src []byte, edits []Edit, names []string) []Edit {
 			out = append(out, Edit{
 				Start:  lineStart,
 				End:    wholeEnd,
+				Line:   lineNo,
+				Lines:  1,
 				Reason: ReasonRemovedMacro,
 				Detail: "removed macro reference",
 			})
@@ -135,10 +148,26 @@ func planMacroScrub(src []byte, edits []Edit, names []string) []Edit {
 			out = append(out, occ...)
 		}
 
+		lineNo++
 		lineStart = nextLine
 	}
 
 	return normalizeEdits(src, out)
+}
+
+// scrubbableAt решает, можно ли вычистить вхождение имени: в комментарии —
+// всегда (как подстрока), в коде — только если это целый токен.
+func scrubbableAt(src []byte, report FileReport, start, end int) bool {
+	if inComment(report.Comments, start) {
+		return true
+	}
+	if start > 0 && isIdentPart(src[start-1]) {
+		return false
+	}
+	if end < len(src) && isIdentPart(src[end]) {
+		return false
+	}
+	return true
 }
 
 // lineInert — true, если после удаления указанных позиций в строке осталась
@@ -155,6 +184,40 @@ func lineInert(src []byte, lineStart, lineEnd int, removed map[int]bool) bool {
 		return false
 	}
 	return true
+}
+
+// inString — находится ли позиция внутри строкового литерала.
+func inString(spans []Span, pos int) bool {
+	lo, hi := 0, len(spans)-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		switch {
+		case pos < spans[mid].Start:
+			hi = mid - 1
+		case pos >= spans[mid].End:
+			lo = mid + 1
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// inComment — находится ли позиция внутри комментария.
+func inComment(spans []CommentSpan, pos int) bool {
+	lo, hi := 0, len(spans)-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		switch {
+		case pos < spans[mid].Start:
+			hi = mid - 1
+		case pos >= spans[mid].End:
+			lo = mid + 1
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func overlapsEdits(edits []Edit, start, end int) bool {

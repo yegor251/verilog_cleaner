@@ -13,15 +13,16 @@ type lexer struct {
 	inBody    bool
 	out       []Directive
 	comments  []CommentSpan
+	strings   []Span
 }
 
 // ScanSource разбирает исходник и возвращает найденные директивы
-// препроцессора и диапазоны комментариев.
+// препроцессора, диапазоны комментариев и строковых литералов.
 func ScanSource(path string, src []byte) FileReport {
 	l := &lexer{src: src, line: 1}
 	l.out = make([]Directive, 0, 1+len(src)/256)
 	l.run()
-	return FileReport{Path: path, Directives: l.out, Comments: l.comments}
+	return FileReport{Path: path, Directives: l.out, Comments: l.comments, Strings: l.strings}
 }
 
 func (l *lexer) run() {
@@ -113,6 +114,7 @@ func (l *lexer) blockComment() {
 }
 
 func (l *lexer) stringLit() {
+	start := l.pos
 	l.pos++
 	for l.pos < len(l.src) {
 		switch l.src[l.pos] {
@@ -125,14 +127,17 @@ func (l *lexer) stringLit() {
 			l.pos += 2
 		case '"':
 			l.pos++
+			l.strings = append(l.strings, Span{Start: start, End: l.pos})
 			return
 		case '\n':
 			l.newline()
+			l.strings = append(l.strings, Span{Start: start, End: l.pos})
 			return
 		default:
 			l.pos++
 		}
 	}
+	l.strings = append(l.strings, Span{Start: start, End: l.pos})
 }
 
 func (l *lexer) escapedIdent() {
