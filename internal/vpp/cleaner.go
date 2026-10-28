@@ -347,7 +347,7 @@ func toBoolSet(names []string) map[string]bool {
 // синтезаторы, например Verilator задаёт `VERILATOR). В дереве их
 // определения нет, но ветки `ifdef по ним мёртвыми считать нельзя.
 var ToolDefines = []string{
-	"VERILATOR", "YOSYS", "SYNTHESIS", "VCS", "VCSMX",
+	"VERILATOR", "YOSYS", "SYNTHESIS", "SIMULATION", "VCS", "VCSMX",
 	"QUESTA", "MODELSIM", "XCELIUM", "IUS", "IVERILOG",
 }
 
