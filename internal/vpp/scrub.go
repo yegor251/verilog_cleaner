@@ -78,6 +78,7 @@ func removedDefineNames(states map[string]*fileState, paths []string, protected 
 func planMacroScrub(src []byte, report FileReport, edits []Edit, names []string) []Edit {
 	var out []Edit
 
+	operand := conditionalOperandRanges(report)
 	lineNo := 1
 	lineStart := 0
 	for lineStart <= len(src) {
@@ -108,6 +109,9 @@ func planMacroScrub(src []byte, report FileReport, edits []Edit, names []string)
 					continue
 				}
 				if inString(report.Strings, start) {
+					continue
+				}
+				if inString(operand, start) {
 					continue
 				}
 				if !scrubbableAt(src, report, start, end) {
@@ -186,7 +190,25 @@ func lineInert(src []byte, lineStart, lineEnd int, removed map[int]bool) bool {
 	return true
 }
 
-// inString — находится ли позиция внутри строкового литерала.
+// conditionalOperandRanges — диапазоны условных директив и `undef: имя макроса
+// в них — операнд директивы, а не использование, и вычищать его нельзя,
+// иначе останется «голый» `ifdef.
+func conditionalOperandRanges(report FileReport) []Span {
+	var out []Span
+	for _, d := range report.Directives {
+		if d.Commented || d.Name == "" {
+			continue
+		}
+		switch d.Kind {
+		case KindIfdef, KindIfndef, KindElsif, KindUndef:
+			out = append(out, Span{Start: d.Offset, End: d.End})
+		}
+	}
+	return out
+}
+
+// inString — находится ли позиция внутри отсортированного диапазона спанов
+// (строковые литералы, операнды директив).
 func inString(spans []Span, pos int) bool {
 	lo, hi := 0, len(spans)-1
 	for lo <= hi {

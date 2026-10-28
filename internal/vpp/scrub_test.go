@@ -123,6 +123,24 @@ func TestCleanerScrubsRemovedMacroAsSubstring(t *testing.T) {
 	}
 }
 
+// Имя удалённого макроса на строке выжившего `ifdef — операнд директивы,
+// а не использование: вычищать его нельзя, иначе останется «голый» `ifdef.
+func TestScrubKeepsNameOnSurvivingIfdefLine(t *testing.T) {
+	src := "`ifdef FEATURE\nwire f;\n`else\nwire g;\n`endif\n"
+	report := ScanSource("f.sv", []byte(src))
+	edits := planMacroScrub([]byte(src), report, nil, []string{"FEATURE"})
+	if got := string(ApplyEdits([]byte(src), edits)); got != src {
+		t.Errorf("ifdef operand must not be scrubbed, got:\n%q", got)
+	}
+
+	src2 := "`undef FEATURE\nwire keep;\n"
+	report2 := ScanSource("f.sv", []byte(src2))
+	edits2 := planMacroScrub([]byte(src2), report2, nil, []string{"FEATURE"})
+	if got := string(ApplyEdits([]byte(src2), edits2)); got != src2 {
+		t.Errorf("undef operand must not be scrubbed, got:\n%q", got)
+	}
+}
+
 func TestCleanerKeepsMacroNameInsideStringLiteral(t *testing.T) {
 	cleaner, sink := newTestCleaner(map[string]string{
 		"cfg.svh": "`ifndef CFG\n`define CFG\n" +
